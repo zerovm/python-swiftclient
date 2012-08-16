@@ -724,6 +724,89 @@ def head_object(url, token, container, name, http_conn=None):
         resp_headers[header.lower()] = value
     return resp_headers
 
+def exec_account(url, token, contents=None,
+                 content_length=None, etag=None, chunk_size=65536,
+                 headers=None, http_conn=None, proxy=None):
+    """
+    Put an object
+
+    :param url: storage URL
+    :param token: auth token; if None, no token will be sent
+    :param contents: a string or a file like object to read object data from;
+                     if None, a zero-byte put will be done
+    :param content_length: value to send as content-length header; also limits
+                           the amount read from contents; if None, it will be
+                           computed via the contents or chunked transfer
+                           encoding will be used
+    :param etag: etag of contents; if None, no etag will be sent
+    :param chunk_size: chunk size of data to write; default 65536
+    :param headers: additional headers to include in the request, if any
+    :param http_conn: HTTP connection object (If None, it will create the
+                      conn object)
+    :param proxy: proxy to connect through, if any; None by default; str of the
+                  format 'http://127.0.0.1:8888' to set one
+    :returns: etag from server response
+    :raises ClientException: HTTP PUT request failed
+    """
+    if http_conn:
+        parsed, conn = http_conn
+    else:
+        parsed, conn = http_connection(url, proxy=proxy)
+    path = parsed.path
+    if headers:
+        headers = dict(headers)
+    else:
+        headers = {}
+    if token:
+        headers['X-Auth-Token'] = token
+    if etag:
+        headers['ETag'] = etag.strip('"')
+    if content_length is not None:
+        headers['Content-Length'] = str(content_length)
+    else:
+        for n, v in headers.iteritems():
+            if n.lower() == 'content-length':
+                content_length = int(v)
+    headers['Content-Type'] = 'application/json'
+    headers['X-Zerovm-Execute'] = '1.0'
+    if not contents:
+        headers['Content-Length'] = '0'
+    if hasattr(contents, 'read'):
+        conn.putrequest('POST', path)
+        for header, value in headers.iteritems():
+            conn.putheader(header, value)
+        if content_length is None:
+            conn.putheader('Transfer-Encoding', 'chunked')
+            conn.endheaders()
+            chunk = contents.read(chunk_size)
+            while chunk:
+                conn.send('%x\r\n%s\r\n' % (len(chunk), chunk))
+                chunk = contents.read(chunk_size)
+            conn.send('0\r\n\r\n')
+        else:
+            conn.endheaders()
+            left = content_length
+            while left > 0:
+                size = chunk_size
+                if size > left:
+                    size = left
+                chunk = contents.read(size)
+                conn.send(chunk)
+                left -= len(chunk)
+    else:
+        conn.request('POST', path, contents, headers)
+    resp = conn.getresponse()
+    body = resp.read()
+    headers = {'X-Auth-Token': token}
+    http_log(('%s?%s' % (url, path), 'POST',),
+            {'headers': headers}, resp, body)
+    if resp.status < 200 or resp.status >= 300:
+        raise ClientException('Execute failed', http_scheme=parsed.scheme,
+            http_host=conn.host, http_port=conn.port,
+            http_path=path, http_status=resp.status,
+            http_reason=resp.reason,
+            http_response_content=body)
+    return headers, body
 
 def put_object(url, token=None, container=None, name=None, contents=None,
                content_length=None, etag=None, chunk_size=65536,

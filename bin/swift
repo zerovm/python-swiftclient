@@ -727,7 +727,6 @@ def st_post(parser, args, print_queue, error_queue):
         error_queue.put('Usage: %s [options] %s' %
                         (basename(argv[0]), st_post_help))
 
-
 st_upload_help = '''
 upload [options] container file_or_directory [file_or_directory] [...]
     Uploads to the given container the files and directories specified by the
@@ -961,6 +960,62 @@ def st_upload(parser, args, print_queue, error_queue):
             raise
         error_queue.put('Account not found')
 
+st_exec_help = '''
+exec [options] config_file [config_file] [...]
+    Executes ZeroVM cluster described by the configuration file
+    Each file must contain one ZeroVM cluster configuration.
+    For help on file format see ZeroVM docs
+'''.strip('\n')
+
+def st_exec(parser, args, print_queue, error_queue):
+    parser.add_option('', '--exec-threads', type=int,
+        default=10, help='Number of threads to use for '
+                         'executing config files simultaneously')
+    (options, args) = parse_args(parser, args)
+    args = args[1:]
+    if len(args) < 1:
+        error_queue.put('Usage: %s [options] %s' %
+                        (basename(argv[0]), st_exec_help))
+        return
+    object_queue = Queue(10000)
+
+    def _exec_job(job, conn):
+        try:
+            path = job['path']
+            put_headers = {}
+            headers, body = conn.exec_account(open(path, 'rb'),
+                content_length=getsize(path), headers=put_headers)
+            print_queue.put('Headers: %s\nBody: %s\n' %(headers, body))
+        except OSError, err:
+            if err.errno != ENOENT:
+                raise
+            error_queue.put('Local file %s not found' % repr(path))
+
+    create_connection = lambda: get_conn(options)
+    object_threads = [QueueFunctionThread(object_queue, _exec_job,
+        create_connection()) for _junk in xrange(options.exec_threads)]
+    for thread in object_threads:
+        thread.start()
+    try:
+        for arg in args:
+
+            if isdir(arg):
+                error_queue.put('Usage: %s [options] %s\n\nUse config file instead of directory: %s\n' %
+                                (basename(argv[0]), st_exec_help, arg))
+                return
+            else:
+                object_queue.put({'path': arg})
+        while not object_queue.empty():
+            sleep(0.01)
+        for thread in object_threads:
+            thread.abort = True
+            while thread.isAlive():
+                thread.join(0.01)
+        put_errors_from_threads(object_threads, error_queue)
+    except ClientException, err:
+        if err.http_status != 404:
+            raise
+        error_queue.put('Account not found')
 
 def split_headers(options, prefix='', error_queue=None):
     """
@@ -1098,7 +1153,7 @@ Example:
     (options, args) = parse_args(parser, argv[1:], enforce_requires=False)
     parser.enable_interspersed_args()
 
-    commands = ('delete', 'download', 'list', 'post', 'stat', 'upload')
+    commands = ('delete', 'download', 'list', 'post', 'stat', 'upload', 'exec')
     if not args or args[0] not in commands:
         parser.print_usage()
         if args:
